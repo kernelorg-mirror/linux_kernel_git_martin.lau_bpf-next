@@ -98,6 +98,14 @@ static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
 {
 	struct bpf_local_storage *local_storage;
 
+	local_storage = container_of(rcu, struct bpf_local_storage, rcu);
+	kfree(local_storage);
+}
+
+static void bpf_local_storage_free_rcu_tasks(struct rcu_head *rcu)
+{
+	struct bpf_local_storage *local_storage;
+
 	/* If RCU Tasks Trace grace period implies RCU grace period, do
 	 * kfree(), else do kfree_rcu().
 	 */
@@ -105,16 +113,17 @@ static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
 	if (rcu_trace_implies_rcu_gp())
 		kfree(local_storage);
 	else
-		kfree_rcu(local_storage, rcu);
+		call_rcu(&local_storage->rcu, bpf_local_storage_free_rcu);
 }
 
 static void bpf_local_storage_free(struct bpf_local_storage *storage,
 				   bool reuse_now)
 {
 	if (!reuse_now)
-		call_rcu_tasks_trace(&storage->rcu, bpf_local_storage_free_rcu);
+		call_rcu_tasks_trace(&storage->rcu,
+				     bpf_local_storage_free_rcu_tasks);
 	else
-		kfree_rcu(storage, rcu);
+		call_rcu(&storage->rcu, bpf_local_storage_free_rcu);
 }
 
 static void bpf_selem_free_rcu(struct rcu_head *rcu)
@@ -122,18 +131,26 @@ static void bpf_selem_free_rcu(struct rcu_head *rcu)
 	struct bpf_local_storage_elem *selem;
 
 	selem = container_of(rcu, struct bpf_local_storage_elem, rcu);
+	kfree(selem);
+}
+
+static void bpf_selem_free_rcu_tasks(struct rcu_head *rcu)
+{
+	struct bpf_local_storage_elem *selem;
+
+	selem = container_of(rcu, struct bpf_local_storage_elem, rcu);
 	if (rcu_trace_implies_rcu_gp())
 		kfree(selem);
 	else
-		kfree_rcu(selem, rcu);
+		call_rcu(&selem->rcu, bpf_selem_free_rcu);
 }
 
 static void bpf_selem_free(struct bpf_local_storage_elem *selem, bool reuse_now)
 {
 	if (!reuse_now)
-		call_rcu_tasks_trace(&selem->rcu, bpf_selem_free_rcu);
+		call_rcu_tasks_trace(&selem->rcu, bpf_selem_free_rcu_tasks);
 	else
-		kfree_rcu(selem, rcu);
+		call_rcu(&selem->rcu, bpf_selem_free_rcu);
 }
 
 /* local_storage->lock must be held and selem->local_storage == local_storage.
