@@ -108,6 +108,15 @@ static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
 		kfree_rcu(local_storage, rcu);
 }
 
+static void bpf_local_storage_free(struct bpf_local_storage *storage,
+				   bool reuse_now)
+{
+	if (!reuse_now)
+		call_rcu_tasks_trace(&storage->rcu, bpf_local_storage_free_rcu);
+	else
+		kfree_rcu(storage, rcu);
+}
+
 static void bpf_selem_free_rcu(struct rcu_head *rcu)
 {
 	struct bpf_local_storage_elem *selem;
@@ -115,6 +124,14 @@ static void bpf_selem_free_rcu(struct rcu_head *rcu)
 	selem = container_of(rcu, struct bpf_local_storage_elem, rcu);
 	if (rcu_trace_implies_rcu_gp())
 		kfree(selem);
+	else
+		kfree_rcu(selem, rcu);
+}
+
+static void bpf_selem_free(struct bpf_local_storage_elem *selem, bool reuse_now)
+{
+	if (!reuse_now)
+		call_rcu_tasks_trace(&selem->rcu, bpf_selem_free_rcu);
 	else
 		kfree_rcu(selem, rcu);
 }
@@ -169,10 +186,7 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 	    SDATA(selem))
 		RCU_INIT_POINTER(local_storage->cache[smap->cache_idx], NULL);
 
-	if (!reuse_now)
-		call_rcu_tasks_trace(&selem->rcu, bpf_selem_free_rcu);
-	else
-		kfree_rcu(selem, rcu);
+	bpf_selem_free(selem, reuse_now);
 
 	if (rcu_access_pointer(local_storage->smap) == smap)
 		RCU_INIT_POINTER(local_storage->smap, NULL);
@@ -199,13 +213,8 @@ static void bpf_selem_unlink_storage(struct bpf_local_storage_elem *selem,
 			local_storage, selem, true, reuse_now);
 	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
 
-	if (free_local_storage) {
-		if (!reuse_now)
-			call_rcu_tasks_trace(&local_storage->rcu,
-				     bpf_local_storage_free_rcu);
-		else
-			kfree_rcu(local_storage, rcu);
-	}
+	if (free_local_storage)
+		bpf_local_storage_free(local_storage, reuse_now);
 }
 
 void bpf_selem_link_storage_nolock(struct bpf_local_storage *local_storage,
@@ -617,7 +626,7 @@ void bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
 	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
 
 	if (free_storage)
-		kfree_rcu(local_storage, rcu);
+		bpf_local_storage_free(local_storage, true);
 }
 
 struct bpf_map *
