@@ -31,7 +31,8 @@ static int mem_charge(struct bpf_local_storage_map *smap, void *owner, u32 size)
 	if (!map->ops->map_local_storage_charge)
 		return 0;
 
-	return map->ops->map_local_storage_charge(smap, owner, size);
+	return map->ops->map_local_storage_charge(smap, owner,
+						  BPF_MA_SIZE(size));
 }
 
 static void mem_uncharge(struct bpf_local_storage_map *smap, void *owner,
@@ -40,7 +41,8 @@ static void mem_uncharge(struct bpf_local_storage_map *smap, void *owner,
 	struct bpf_map *map = &smap->map;
 
 	if (map->ops->map_local_storage_uncharge)
-		map->ops->map_local_storage_uncharge(smap, owner, size);
+		map->ops->map_local_storage_uncharge(smap, owner,
+						     BPF_MA_SIZE(size));
 }
 
 static struct bpf_local_storage __rcu **
@@ -80,8 +82,17 @@ __bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 	if (charge_mem && mem_charge(smap, owner, smap->elem_size))
 		return NULL;
 
-	selem = bpf_map_kzalloc(&smap->map, smap->elem_size,
-				gfp_flags | __GFP_NOWARN);
+	selem = bpf_mem_cache_alloc(&smap->selem_ma);
+	if (!selem && (gfp_flags & GFP_KERNEL)) {
+		void *ma_obj;
+
+		ma_obj = bpf_map_kzalloc(&smap->map,
+					 BPF_MA_SIZE(smap->elem_size),
+					 gfp_flags | __GFP_NOWARN);
+		if (ma_obj)
+			selem = BPF_MA_PTR(ma_obj);
+	}
+
 	if (selem) {
 		if (value)
 			copy_map_value(&smap->map, SDATA(selem)->data, value);
@@ -98,13 +109,13 @@ struct bpf_local_storage_elem *
 bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 		void *value, bool charge_mem, gfp_t gfp_flags)
 {
-       struct bpf_local_storage_elem *selem;
+	struct bpf_local_storage_elem *selem;
 
-       migrate_disable();
-       selem = __bpf_selem_alloc(smap, owner, value, charge_mem, gfp_flags);
-       migrate_enable();
+	migrate_disable();
+	selem = __bpf_selem_alloc(smap, owner, value, charge_mem, gfp_flags);
+	migrate_enable();
 
-       return selem;
+	return selem;
 }
 
 static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
@@ -112,7 +123,7 @@ static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
 	struct bpf_local_storage *local_storage;
 
 	local_storage = container_of(rcu, struct bpf_local_storage, rcu);
-	kfree(local_storage);
+	kfree(BPF_MA_NODE(local_storage));
 }
 
 static void bpf_local_storage_free_rcu_tasks(struct rcu_head *rcu)
@@ -124,17 +135,23 @@ static void bpf_local_storage_free_rcu_tasks(struct rcu_head *rcu)
 	 */
 	local_storage = container_of(rcu, struct bpf_local_storage, rcu);
 	if (rcu_trace_implies_rcu_gp())
-		kfree(local_storage);
+		kfree(BPF_MA_NODE(local_storage));
 	else
 		call_rcu(&local_storage->rcu, bpf_local_storage_free_rcu);
 }
 
 static void bpf_local_storage_free(struct bpf_local_storage *storage,
+				   struct bpf_local_storage_map *smap,
 				   bool reuse_now)
 {
-	if (!reuse_now)
+	if (!reuse_now) {
 		call_rcu_tasks_trace(&storage->rcu,
 				     bpf_local_storage_free_rcu_tasks);
+		return;
+	}
+
+	if (smap && !bpf_mem_cache_overflow(&smap->storage_ma))
+		bpf_mem_cache_free(&smap->storage_ma, storage);
 	else
 		call_rcu(&storage->rcu, bpf_local_storage_free_rcu);
 }
@@ -144,7 +161,7 @@ static void bpf_selem_free_rcu(struct rcu_head *rcu)
 	struct bpf_local_storage_elem *selem;
 
 	selem = container_of(rcu, struct bpf_local_storage_elem, rcu);
-	kfree(selem);
+	kfree(BPF_MA_NODE(selem));
 }
 
 static void bpf_selem_free_rcu_tasks(struct rcu_head *rcu)
@@ -153,15 +170,22 @@ static void bpf_selem_free_rcu_tasks(struct rcu_head *rcu)
 
 	selem = container_of(rcu, struct bpf_local_storage_elem, rcu);
 	if (rcu_trace_implies_rcu_gp())
-		kfree(selem);
+		kfree(BPF_MA_NODE(selem));
 	else
 		call_rcu(&selem->rcu, bpf_selem_free_rcu);
 }
 
-static void bpf_selem_free(struct bpf_local_storage_elem *selem, bool reuse_now)
+static void bpf_selem_free(struct bpf_local_storage_elem *selem,
+			   struct bpf_local_storage_map *smap,
+			   bool reuse_now)
 {
-	if (!reuse_now)
+	if (!reuse_now) {
 		call_rcu_tasks_trace(&selem->rcu, bpf_selem_free_rcu_tasks);
+		return;
+	}
+
+	if (!bpf_mem_cache_overflow(&smap->selem_ma))
+		bpf_mem_cache_free(&smap->selem_ma, selem);
 	else
 		call_rcu(&selem->rcu, bpf_selem_free_rcu);
 }
@@ -191,7 +215,7 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 	free_local_storage = hlist_is_singular_node(&selem->snode,
 						    &local_storage->list);
 	if (free_local_storage) {
-		mem_uncharge(smap, owner, sizeof(struct bpf_local_storage));
+		mem_uncharge(smap, owner, sizeof(*local_storage));
 		local_storage->owner = NULL;
 
 		/* After this RCU_INIT, owner may be freed and cannot be used */
@@ -216,7 +240,7 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 	    SDATA(selem))
 		RCU_INIT_POINTER(local_storage->cache[smap->cache_idx], NULL);
 
-	bpf_selem_free(selem, reuse_now);
+	bpf_selem_free(selem, smap, reuse_now);
 
 	if (rcu_access_pointer(local_storage->smap) == smap)
 		RCU_INIT_POINTER(local_storage->smap, NULL);
@@ -227,6 +251,7 @@ static bool bpf_selem_unlink_storage_nolock(struct bpf_local_storage *local_stor
 static void bpf_selem_unlink_storage(struct bpf_local_storage_elem *selem,
 				     bool reuse_now)
 {
+	struct bpf_local_storage_map *storage_smap;
 	struct bpf_local_storage *local_storage;
 	bool free_local_storage = false;
 	unsigned long flags;
@@ -237,6 +262,8 @@ static void bpf_selem_unlink_storage(struct bpf_local_storage_elem *selem,
 
 	local_storage = rcu_dereference_check(selem->local_storage,
 					      bpf_rcu_lock_held());
+	storage_smap = rcu_dereference_check(local_storage->smap,
+					     bpf_rcu_lock_held());
 	raw_spin_lock_irqsave(&local_storage->lock, flags);
 	if (likely(selem_linked_to_storage(selem)))
 		free_local_storage = bpf_selem_unlink_storage_nolock(
@@ -244,7 +271,7 @@ static void bpf_selem_unlink_storage(struct bpf_local_storage_elem *selem,
 	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
 
 	if (free_local_storage)
-		bpf_local_storage_free(local_storage, reuse_now);
+		bpf_local_storage_free(local_storage, storage_smap, reuse_now);
 }
 
 void bpf_selem_link_storage_nolock(struct bpf_local_storage *local_storage,
@@ -364,8 +391,16 @@ static int __bpf_local_storage_alloc(void *owner,
 	if (err)
 		return err;
 
-	storage = bpf_map_kzalloc(&smap->map, sizeof(*storage),
-				  gfp_flags | __GFP_NOWARN);
+	storage = bpf_mem_cache_alloc(&smap->storage_ma);
+	if (!storage && (gfp_flags & GFP_KERNEL)) {
+		void *ma_obj;
+
+		ma_obj = bpf_map_kzalloc(&smap->map, BPF_MA_SIZEOF(*storage),
+					 gfp_flags | __GFP_NOWARN);
+		if (ma_obj)
+			storage = BPF_MA_PTR(ma_obj);
+	}
+
 	if (!storage) {
 		err = -ENOMEM;
 		goto uncharge;
@@ -411,7 +446,7 @@ static int __bpf_local_storage_alloc(void *owner,
 	return 0;
 
 uncharge:
-	kfree(storage);
+	bpf_local_storage_free(storage, smap, true);
 	mem_uncharge(smap, owner, sizeof(*storage));
 	return err;
 }
@@ -469,7 +504,7 @@ __bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 
 		err = __bpf_local_storage_alloc(owner, smap, selem, gfp_flags);
 		if (err) {
-			kfree(selem);
+			bpf_selem_free(selem, smap, true);
 			mem_uncharge(smap, owner, smap->elem_size);
 			return ERR_PTR(err);
 		}
@@ -563,7 +598,7 @@ unlock_err:
 	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
 	if (selem) {
 		mem_uncharge(smap, owner, smap->elem_size);
-		kfree(selem);
+		bpf_selem_free(selem, smap, true);
 	}
 	return ERR_PTR(err);
 }
@@ -652,10 +687,14 @@ int bpf_local_storage_map_check_btf(const struct bpf_map *map,
 
 void bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
 {
+	struct bpf_local_storage_map *storage_smap;
 	struct bpf_local_storage_elem *selem;
 	bool free_storage = false;
 	struct hlist_node *n;
 	unsigned long flags;
+
+	storage_smap = rcu_dereference_check(local_storage->smap,
+					     bpf_rcu_lock_held());
 
 	/* Neither the bpf_prog nor the bpf_map's syscall
 	 * could be modifying the local_storage->list now.
@@ -684,7 +723,7 @@ void bpf_local_storage_destroy(struct bpf_local_storage *local_storage)
 	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
 
 	if (free_storage)
-		bpf_local_storage_free(local_storage, true);
+		bpf_local_storage_free(local_storage, storage_smap, true);
 }
 
 struct bpf_map *
@@ -694,6 +733,7 @@ bpf_local_storage_map_alloc(union bpf_attr *attr,
 	struct bpf_local_storage_map *smap;
 	unsigned int i;
 	u32 nbuckets;
+	int err;
 
 	smap = bpf_map_area_alloc(sizeof(*smap), NUMA_NO_NODE);
 	if (!smap)
@@ -708,8 +748,8 @@ bpf_local_storage_map_alloc(union bpf_attr *attr,
 	smap->buckets = kvcalloc(sizeof(*smap->buckets), nbuckets,
 				 GFP_USER | __GFP_NOWARN | __GFP_ACCOUNT);
 	if (!smap->buckets) {
-		bpf_map_area_free(smap);
-		return ERR_PTR(-ENOMEM);
+		err = -ENOMEM;
+		goto free_smap;
 	}
 
 	for (i = 0; i < nbuckets; i++) {
@@ -720,8 +760,27 @@ bpf_local_storage_map_alloc(union bpf_attr *attr,
 	smap->elem_size = offsetof(struct bpf_local_storage_elem, sdata) +
 		offsetof(struct bpf_local_storage_data, data[attr->value_size]);
 
+	err = bpf_mem_alloc_init(&smap->storage_ma, sizeof(struct bpf_local_storage),
+				 false);
+	if (err)
+		goto free_smap;
+
+	err = bpf_mem_alloc_init(&smap->selem_ma, smap->elem_size,
+				 false);
+	if (err) {
+		bpf_mem_alloc_destroy(&smap->storage_ma);
+		goto free_smap;
+	}
+
 	smap->cache_idx = bpf_local_storage_cache_idx_get(cache);
 	return &smap->map;
+
+free_smap:
+	if(smap) {
+		kvfree(smap->buckets);
+		bpf_map_area_free(smap);
+	}
+	return ERR_PTR(err);
 }
 
 void bpf_local_storage_map_free(struct bpf_map *map,
@@ -787,6 +846,8 @@ void bpf_local_storage_map_free(struct bpf_map *map,
 	 */
 	synchronize_rcu();
 
+	bpf_mem_alloc_destroy(&smap->selem_ma);
+	bpf_mem_alloc_destroy(&smap->storage_ma);
 	kvfree(smap->buckets);
 	bpf_map_area_free(smap);
 }

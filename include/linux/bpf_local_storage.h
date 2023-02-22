@@ -13,6 +13,7 @@
 #include <linux/list.h>
 #include <linux/hash.h>
 #include <linux/types.h>
+#include <linux/bpf_mem_alloc.h>
 #include <uapi/linux/btf.h>
 
 #define BPF_LOCAL_STORAGE_CACHE_SIZE	16
@@ -55,6 +56,8 @@ struct bpf_local_storage_map {
 	u32 bucket_log;
 	u16 elem_size;
 	u16 cache_idx;
+	struct bpf_mem_alloc selem_ma;
+	struct bpf_mem_alloc storage_ma;
 };
 
 struct bpf_local_storage_data {

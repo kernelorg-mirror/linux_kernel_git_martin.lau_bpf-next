@@ -676,3 +676,15 @@ void notrace bpf_mem_cache_free(struct bpf_mem_alloc *ma, void *ptr)
 
 	unit_free(this_cpu_ptr(ma->cache), ptr);
 }
+
+bool notrace bpf_mem_cache_overflow(struct bpf_mem_alloc *ma)
+{
+       struct bpf_mem_cache *c;
+
+       /* Caller may not have migrate_disable() but
+	* it does not have to be very accurate.
+	*/
+       c = raw_cpu_ptr(ma->cache);
+
+       return c->free_cnt >= c->high_watermark;
+}
