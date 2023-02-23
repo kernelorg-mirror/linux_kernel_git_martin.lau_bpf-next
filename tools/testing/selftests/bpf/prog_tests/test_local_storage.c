@@ -156,7 +156,7 @@ void test_test_local_storage(void)
 	if (!ASSERT_GE(serv_sk, 0, "start_server"))
 		goto close_prog_rmdir;
 
-	ASSERT_EQ(skel->data->sk_storage_result, 0, "sk_storage_result");
+	ASSERT_EQ(skel->bss->sk_storage_errs, 0, "sk_storage_errs");
 
 	if (!check_syscall_operations(bpf_map__fd(skel->maps.sk_storage_map),
 				      serv_sk))

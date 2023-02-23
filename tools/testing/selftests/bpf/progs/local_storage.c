@@ -15,7 +15,7 @@ char _license[] SEC("license") = "GPL";
 
 int monitored_pid = 0;
 int inode_storage_result = -1;
-int sk_storage_result = -1;
+int sk_storage_errs = 0;
 
 struct local_storage {
 	struct inode *exec_inode;
@@ -119,24 +119,45 @@ int BPF_PROG(socket_bind, struct socket *sock, struct sockaddr *address,
 	if (!storage)
 		return 0;
 
-	if (storage->value != DUMMY_STORAGE_VALUE)
-		sk_storage_result = -1;
+	if (storage->value != DUMMY_STORAGE_VALUE) {
+		sk_storage_errs++;
+		return 0;
+	}
 
 	/* This tests that we can associate multiple elements
 	 * with the local storage.
 	 */
 	storage = bpf_sk_storage_get(&sk_storage_map2, sock->sk, 0,
 				     BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!storage)
+	if (!storage) {
+		sk_storage_errs++;
 		return 0;
+	}
 
-	err = bpf_sk_storage_delete(&sk_storage_map, sock->sk);
-	if (err)
+	if (bpf_sk_storage_delete(&sk_storage_map2, sock->sk)) {
+		sk_storage_errs++;
 		return 0;
+	}
 
-	err = bpf_sk_storage_delete(&sk_storage_map2, sock->sk);
-	if (!err)
-		sk_storage_result = err;
+	storage = bpf_sk_storage_get(&sk_storage_map2, sock->sk, 0,
+				     BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!storage) {
+		sk_storage_errs++;
+		return 0;
+	}
+
+	if (bpf_sk_storage_delete(&sk_storage_map, sock->sk)) {
+		sk_storage_errs++;
+		return 0;
+	}
+
+	/* Ensure that the sk_storage_map is disconnected from the storage.
+	 * The storage memory should not be freed back to the
+	 * bpf_mem_cache ub the sk_bpf_storage_map because
+	 * sk_bpf_storage_map may have been gone.
+	 */
+	if (!sock->sk->sk_bpf_storage || sock->sk->sk_bpf_storage->smap)
+		sk_storage_errs++;
 
 	return 0;
 }
