@@ -71,9 +71,9 @@ static bool selem_linked_to_map(const struct bpf_local_storage_elem *selem)
 	return !hlist_unhashed(&selem->map_node);
 }
 
-struct bpf_local_storage_elem *
-bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
-		void *value, bool charge_mem, gfp_t gfp_flags)
+static struct bpf_local_storage_elem *
+__bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
+		  void *value, bool charge_mem, gfp_t gfp_flags)
 {
 	struct bpf_local_storage_elem *selem;
 
@@ -92,6 +92,19 @@ bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
 		mem_uncharge(smap, owner, smap->elem_size);
 
 	return NULL;
+}
+
+struct bpf_local_storage_elem *
+bpf_selem_alloc(struct bpf_local_storage_map *smap, void *owner,
+		void *value, bool charge_mem, gfp_t gfp_flags)
+{
+       struct bpf_local_storage_elem *selem;
+
+       migrate_disable();
+       selem = __bpf_selem_alloc(smap, owner, value, charge_mem, gfp_flags);
+       migrate_enable();
+
+       return selem;
 }
 
 static void bpf_local_storage_free_rcu(struct rcu_head *rcu)
@@ -338,10 +351,10 @@ static int check_flags(const struct bpf_local_storage_data *old_sdata,
 	return 0;
 }
 
-int bpf_local_storage_alloc(void *owner,
-			    struct bpf_local_storage_map *smap,
-			    struct bpf_local_storage_elem *first_selem,
-			    gfp_t gfp_flags)
+static int __bpf_local_storage_alloc(void *owner,
+				     struct bpf_local_storage_map *smap,
+				     struct bpf_local_storage_elem *first_selem,
+				     gfp_t gfp_flags)
 {
 	struct bpf_local_storage *prev_storage, *storage;
 	struct bpf_local_storage **owner_storage_ptr;
@@ -403,14 +416,28 @@ uncharge:
 	return err;
 }
 
+int bpf_local_storage_alloc(void *owner,
+			    struct bpf_local_storage_map *smap,
+			    struct bpf_local_storage_elem *first_selem,
+			    gfp_t gfp_flags)
+{
+	int err;
+
+	migrate_disable();
+	err = __bpf_local_storage_alloc(owner, smap, first_selem, gfp_flags);
+	migrate_enable();
+
+	return err;
+}
+
 /* sk cannot be going away because it is linking new elem
  * to sk->sk_bpf_storage. (i.e. sk->sk_refcnt cannot be 0).
  * Otherwise, it will become a leak (and other memory issues
  * during map destruction).
  */
 struct bpf_local_storage_data *
-bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
-			 void *value, u64 map_flags, gfp_t gfp_flags)
+__bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
+			   void *value, u64 map_flags, gfp_t gfp_flags)
 {
 	struct bpf_local_storage_data *old_sdata = NULL;
 	struct bpf_local_storage_elem *selem = NULL;
@@ -436,11 +463,11 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 		if (err)
 			return ERR_PTR(err);
 
-		selem = bpf_selem_alloc(smap, owner, value, true, gfp_flags);
+		selem = __bpf_selem_alloc(smap, owner, value, true, gfp_flags);
 		if (!selem)
 			return ERR_PTR(-ENOMEM);
 
-		err = bpf_local_storage_alloc(owner, smap, selem, gfp_flags);
+		err = __bpf_local_storage_alloc(owner, smap, selem, gfp_flags);
 		if (err) {
 			kfree(selem);
 			mem_uncharge(smap, owner, smap->elem_size);
@@ -468,7 +495,7 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 	}
 
 	if (gfp_flags == GFP_KERNEL) {
-		selem = bpf_selem_alloc(smap, owner, value, true, gfp_flags);
+		selem = __bpf_selem_alloc(smap, owner, value, true, gfp_flags);
 		if (!selem)
 			return ERR_PTR(-ENOMEM);
 	}
@@ -508,7 +535,7 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 		 * old_sdata will not be uncharged later during
 		 * bpf_selem_unlink_storage_nolock().
 		 */
-		selem = bpf_selem_alloc(smap, owner, value, !old_sdata, gfp_flags);
+		selem = __bpf_selem_alloc(smap, owner, value, !old_sdata, gfp_flags);
 		if (!selem) {
 			err = -ENOMEM;
 			goto unlock_err;
@@ -539,6 +566,20 @@ unlock_err:
 		kfree(selem);
 	}
 	return ERR_PTR(err);
+}
+
+struct bpf_local_storage_data *
+bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
+			 void *value, u64 map_flags, gfp_t gfp_flags)
+{
+	struct bpf_local_storage_data *sdata;
+
+	migrate_disable();
+	sdata = __bpf_local_storage_update(owner, smap, value, map_flags,
+					   gfp_flags);
+	migrate_enable();
+
+	return sdata;
 }
 
 static u16 bpf_local_storage_cache_idx_get(struct bpf_local_storage_cache *cache)

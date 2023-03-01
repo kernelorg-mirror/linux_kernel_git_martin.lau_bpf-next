@@ -168,7 +168,7 @@ BPF_CALL_5(bpf_inode_storage_get, struct bpf_map *, map, struct inode *, inode,
 	 * to have a refcount and cannot be freed.
 	 */
 	if (flags & BPF_LOCAL_STORAGE_GET_F_CREATE) {
-		sdata = bpf_local_storage_update(
+		sdata = __bpf_local_storage_update(
 			inode, (struct bpf_local_storage_map *)map, value,
 			BPF_NOEXIST, gfp_flags);
 		return IS_ERR(sdata) ? (unsigned long)NULL :

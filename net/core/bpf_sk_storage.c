@@ -241,7 +241,7 @@ BPF_CALL_5(bpf_sk_storage_get, struct bpf_map *, map, struct sock *, sk,
 	     *  destruction).
 	     */
 	    refcount_inc_not_zero(&sk->sk_refcnt)) {
-		sdata = bpf_local_storage_update(
+		sdata = __bpf_local_storage_update(
 			sk, (struct bpf_local_storage_map *)map, value,
 			BPF_NOEXIST, gfp_flags);
 		/* sk must be a fullsock (guaranteed by verifier),

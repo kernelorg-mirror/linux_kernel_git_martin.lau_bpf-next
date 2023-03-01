@@ -162,4 +162,8 @@ struct bpf_local_storage_data *
 bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 			 void *value, u64 map_flags, gfp_t gfp_flags);
 
+struct bpf_local_storage_data *
+__bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
+			   void *value, u64 map_flags, gfp_t gfp_flags);
+
 #endif /* _BPF_LOCAL_STORAGE_H */

@@ -217,7 +217,7 @@ static void *__bpf_task_storage_get(struct bpf_map *map,
 	/* only allocate new storage, when the task is refcounted */
 	if (refcount_read(&task->usage) &&
 	    (flags & BPF_LOCAL_STORAGE_GET_F_CREATE) && nobusy) {
-		sdata = bpf_local_storage_update(
+		sdata = __bpf_local_storage_update(
 			task, (struct bpf_local_storage_map *)map, value,
 			BPF_NOEXIST, gfp_flags);
 		return IS_ERR(sdata) ? NULL : sdata->data;

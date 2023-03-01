@@ -180,8 +180,8 @@ BPF_CALL_5(bpf_cgrp_storage_get, struct bpf_map *, map, struct cgroup *, cgroup,
 	/* only allocate new storage, when the cgroup is refcounted */
 	if (!percpu_ref_is_dying(&cgroup->self.refcnt) &&
 	    (flags & BPF_LOCAL_STORAGE_GET_F_CREATE))
-		sdata = bpf_local_storage_update(cgroup, (struct bpf_local_storage_map *)map,
-						 value, BPF_NOEXIST, gfp_flags);
+		sdata = __bpf_local_storage_update(cgroup, (struct bpf_local_storage_map *)map,
+						   value, BPF_NOEXIST, gfp_flags);
 
 unlock:
 	bpf_cgrp_storage_unlock();
