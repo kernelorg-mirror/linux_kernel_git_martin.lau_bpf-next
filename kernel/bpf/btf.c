@@ -226,13 +226,13 @@ enum {
 };
 
 struct btf_kfunc_hook_filter {
-	btf_kfunc_filter_t filters[BTF_KFUNC_FILTER_MAX_CNT];
 	u32 nr_filters;
+	btf_kfunc_filter_t filters[];
 };
 
 struct btf_kfunc_set_tab {
 	struct btf_id_set8 *sets[BTF_KFUNC_HOOK_MAX];
-	struct btf_kfunc_hook_filter hook_filters[BTF_KFUNC_HOOK_MAX];
+	struct btf_kfunc_hook_filter *hook_filters[BTF_KFUNC_HOOK_MAX];
 };
 
 struct btf_id_dtor_kfunc_tab {
@@ -1645,18 +1645,19 @@ static void btf_free_id(struct btf *btf)
 static void btf_free_kfunc_set_tab(struct btf *btf)
 {
 	struct btf_kfunc_set_tab *tab = btf->kfunc_set_tab;
+	bool is_module = btf_is_module(btf);
 	int hook;
 
 	if (!tab)
 		return;
-	/* For module BTF, we directly assign the sets being registered, so
-	 * there is nothing to free except kfunc_set_tab.
-	 */
-	if (btf_is_module(btf))
-		goto free_tab;
-	for (hook = 0; hook < ARRAY_SIZE(tab->sets); hook++)
-		kfree(tab->sets[hook]);
-free_tab:
+	for (hook = 0; hook < ARRAY_SIZE(tab->sets); hook++) {
+		kfree(tab->hook_filters[hook]);
+		/* For module BTF, we directly assign the sets being registered, so
+		 * no need to free tab->sets.
+		 */
+		if (!is_module)
+			kfree(tab->sets[hook]);
+	}
 	kfree(tab);
 	btf->kfunc_set_tab = NULL;
 }
@@ -7678,10 +7679,8 @@ static int btf_check_kfunc_protos(struct btf *btf, u32 func_id, u32 func_flags)
 static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 				  const struct btf_kfunc_id_set *kset)
 {
-	struct btf_kfunc_hook_filter *hook_filter;
 	struct btf_id_set8 *add_set = kset->set;
 	bool vmlinux_set = !btf_is_module(btf);
-	bool add_filter = !!kset->filter;
 	struct btf_kfunc_set_tab *tab;
 	struct btf_id_set8 *set;
 	u32 set_cnt;
@@ -7696,19 +7695,6 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 		return 0;
 
 	tab = btf->kfunc_set_tab;
-
-	if (tab && add_filter) {
-		int i;
-
-		hook_filter = &tab->hook_filters[hook];
-		for (i = 0; i < hook_filter->nr_filters; i++) {
-			if (hook_filter->filters[i] == kset->filter)
-				add_filter = false;
-		}
-
-		if (add_filter && hook_filter->nr_filters == BTF_KFUNC_FILTER_MAX_CNT)
-			return -E2BIG;
-	}
 
 	if (!tab) {
 		tab = kzalloc(sizeof(*tab), GFP_KERNEL | __GFP_NOWARN);
@@ -7726,13 +7712,44 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 		goto end;
 	}
 
+	if (kset->filter) {
+		struct btf_kfunc_hook_filter *hook_filter;
+		u32 nr_filters, i;
+
+		hook_filter = tab->hook_filters[hook];
+		nr_filters = hook_filter ? hook_filter->nr_filters : 0;
+		for (i = 0; i < nr_filters; i++) {
+			if (hook_filter->filters[i] == kset->filter)
+				goto do_add_set;
+		}
+
+		if (nr_filters == BTF_KFUNC_FILTER_MAX_CNT) {
+			ret = -E2BIG;
+			goto end;
+		}
+
+		hook_filter = krealloc(hook_filter,
+				       offsetof(struct btf_kfunc_hook_filter,
+						filters[nr_filters + 1]),
+				       GFP_KERNEL | __GFP_NOWARN);
+		if (!hook_filter) {
+			ret = -ENOMEM;
+			goto end;
+		}
+
+		hook_filter->filters[nr_filters++] = kset->filter;
+		hook_filter->nr_filters = nr_filters;
+		tab->hook_filters[hook] = hook_filter;
+	}
+
+do_add_set:
 	/* We don't need to allocate, concatenate, and sort module sets, because
 	 * only one is allowed per hook. Hence, we can directly assign the
 	 * pointer and return.
 	 */
 	if (!vmlinux_set) {
 		tab->sets[hook] = add_set;
-		goto do_add_filter;
+		return 0;
 	}
 
 	/* In case of vmlinux sets, there may be more than one set being
@@ -7774,11 +7791,6 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 
 	sort(set->pairs, set->cnt, sizeof(set->pairs[0]), btf_id_cmp_func, NULL);
 
-do_add_filter:
-	if (add_filter) {
-		hook_filter = &tab->hook_filters[hook];
-		hook_filter->filters[hook_filter->nr_filters++] = kset->filter;
-	}
 	return 0;
 end:
 	btf_free_kfunc_set_tab(btf);
@@ -7798,10 +7810,12 @@ static u32 *__btf_kfunc_id_set_contains(const struct btf *btf,
 		return NULL;
 	if (!btf->kfunc_set_tab)
 		return NULL;
-	hook_filter = &btf->kfunc_set_tab->hook_filters[hook];
-	for (i = 0; i < hook_filter->nr_filters; i++) {
-		if (hook_filter->filters[i](prog, kfunc_btf_id))
-			return NULL;
+	hook_filter = btf->kfunc_set_tab->hook_filters[hook];
+	if (hook_filter) {
+		for (i = 0; i < hook_filter->nr_filters; i++) {
+			if (hook_filter->filters[i](prog, kfunc_btf_id))
+				return NULL;
+		}
 	}
 	set = btf->kfunc_set_tab->sets[hook];
 	if (!set)
