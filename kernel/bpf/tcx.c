@@ -92,17 +92,34 @@ out:
 	return ret;
 }
 
+static struct bpf_mprog_entry *
+bpf_mprog_empty_peer(struct bpf_mprog_entry *entry)
+{
+	struct bpf_mprog_entry *peer;
+
+	peer = bpf_mprog_peer(entry);
+	memset(peer->fp_items, 0, sizeof(peer->fp_items));
+
+	return peer;
+}
+
 void tcx_uninstall(struct net_device *dev, bool ingress)
 {
+	struct bpf_mprog_entry *entry, *entry_new = NULL;
 	struct bpf_tuple tuple = {};
-	struct bpf_mprog_entry *entry;
 	struct bpf_mprog_fp *fp;
 	struct bpf_mprog_cp *cp;
+	bool active;
 
 	entry = tcx_entry_fetch(dev, ingress);
 	if (!entry)
 		return;
-	tcx_entry_update(dev, NULL, ingress);
+
+	active = tcx_entry(entry)->miniq_active;
+	if (active)
+		entry_new = bpf_mprog_empty_peer(entry);
+
+	tcx_entry_update(dev, entry_new, ingress);
 	tcx_entry_sync();
 	bpf_mprog_foreach_tuple(entry, fp, cp, tuple) {
 		if (tuple.link)
@@ -110,9 +127,10 @@ void tcx_uninstall(struct net_device *dev, bool ingress)
 		else
 			bpf_prog_put(tuple.prog);
 		tcx_skeys_dec(ingress);
+		bpf_mprog_dec(entry);
 	}
-	WARN_ON_ONCE(tcx_entry(entry)->miniq_active);
-	tcx_entry_free(entry);
+	if (!active)
+		tcx_entry_free(entry);
 }
 
 int tcx_prog_query(const union bpf_attr *attr, union bpf_attr __user *uattr)
