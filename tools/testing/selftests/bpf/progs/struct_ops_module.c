@@ -7,6 +7,12 @@
 
 char _license[] SEC("license") = "GPL";
 
+struct bpf_sk_buff_ptr {
+	struct sk_buff *skb;
+};
+
+extern int bpf_qdisc_drop(struct sk_buff *skb, struct Qdisc *sch,
+			  struct bpf_sk_buff_ptr *skb_ptr) __ksym;
 int test_2_result = 0;
 
 SEC("struct_ops/test_1")
@@ -22,9 +28,19 @@ int BPF_PROG(test_2, int a, int b)
 	return a + b;
 }
 
+SEC("struct_ops/enqueue")
+int BPF_PROG(test_enqueue, struct sk_buff *skb,
+	     struct Qdisc *sch,
+	     struct bpf_sk_buff_ptr *to_free_list)
+{
+	/* This will fail to load due to KF_RELEASE in bpf_qdisc_drop */
+	return bpf_qdisc_drop(skb, sch, to_free_list);
+}
+
 SEC(".struct_ops.link")
 struct bpf_testmod_ops testmod_1 = {
 	.test_1 = (void *)test_1,
 	.test_2 = (void *)test_2,
+	.enqueue = (void *)test_enqueue,
 };
 

@@ -522,6 +522,27 @@ BTF_ID_FLAGS(func, bpf_kfunc_call_test_static_unused_arg)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_offset)
 BTF_KFUNCS_END(bpf_testmod_check_kfunc_ids)
 
+struct bpf_sk_buff_ptr {
+	struct sk_buff *skb;
+};
+
+BTF_ID_LIST_SINGLE(bpf_sk_buff_ptr_ids, struct, bpf_sk_buff_ptr)
+
+__bpf_kfunc int bpf_qdisc_drop(struct sk_buff *skb, struct Qdisc *sch,
+			       struct bpf_sk_buff_ptr *to_free_list)
+{
+	return 1; /* NET_XMIT_DROP */
+}
+
+BTF_KFUNCS_START(bpf_testmod_ops_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_qdisc_drop, KF_RELEASE)
+BTF_KFUNCS_END(bpf_testmod_ops_kfunc_ids)
+
+static const struct btf_kfunc_id_set bpf_testmod_ops_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set   = &bpf_testmod_ops_kfunc_ids,
+};
+
 static int bpf_testmod_ops_init(struct btf *btf)
 {
 	return 0;
@@ -532,6 +553,15 @@ static bool bpf_testmod_ops_is_valid_access(int off, int size,
 					    const struct bpf_prog *prog,
 					    struct bpf_insn_access_aux *info)
 {
+	if (!strcmp(prog->aux->attach_func_name, "enqueue") &&
+	    /* FIXME, use get_ctx_arg_idx instead */
+	    off / sizeof(__u64) == 2) {
+		info->reg_type = PTR_TO_BTF_ID | PTR_TRUSTED;
+		info->btf = prog->aux->attach_btf;
+		info->btf_id = bpf_sk_buff_ptr_ids[0];
+		return true;
+	}
+
 	return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
 }
 
@@ -601,6 +631,7 @@ static int bpf_testmod_init(void)
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_SCHED_CLS, &bpf_testmod_kfunc_set);
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &bpf_testmod_kfunc_set);
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &bpf_testmod_kfunc_set);
+	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &bpf_testmod_ops_kfunc_set);
 	ret = ret ?: register_bpf_struct_ops(&bpf_bpf_testmod_ops, bpf_testmod_ops);
 	if (ret < 0)
 		return ret;
