@@ -89,8 +89,8 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 	struct bpf_dummy_ops_test_args *args;
 	struct bpf_tramp_links *tlinks;
 	struct bpf_tramp_link *link = NULL;
+	unsigned int op_idx, image_off = 0;
 	void *image = NULL;
-	unsigned int op_idx;
 	int prog_ret;
 	s32 type_id;
 	int err;
@@ -114,12 +114,6 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 		goto out;
 	}
 
-	image = arch_alloc_bpf_trampoline(PAGE_SIZE);
-	if (!image) {
-		err = -ENOMEM;
-		goto out;
-	}
-
 	link = kzalloc(sizeof(*link), GFP_USER);
 	if (!link) {
 		err = -ENOMEM;
@@ -130,12 +124,14 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 	bpf_link_init(&link->link, BPF_LINK_TYPE_STRUCT_OPS, &bpf_struct_ops_link_lops, prog);
 
 	op_idx = prog->expected_attach_type;
-	err = bpf_struct_ops_prepare_trampoline(tlinks, link,
-						&st_ops->func_models[op_idx],
-						&dummy_ops_test_ret_function,
-						image, image + PAGE_SIZE);
-	if (err < 0)
+	image = bpf_struct_ops_prepare_trampoline(tlinks, link,
+						  &st_ops->func_models[op_idx],
+						  &dummy_ops_test_ret_function,
+						  NULL, &image_off, true);
+	if (IS_ERR(image)) {
+		err = PTR_ERR(image);
 		goto out;
+	}
 
 	arch_protect_bpf_trampoline(image, PAGE_SIZE);
 	prog_ret = dummy_ops_call_op(image, args);
@@ -147,7 +143,8 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 		err = -EFAULT;
 out:
 	kfree(args);
-	arch_free_bpf_trampoline(image, PAGE_SIZE);
+	if (!IS_ERR_OR_NULL(image))
+		bpf_struct_ops_free_trampoline(image);
 	if (link)
 		bpf_link_put(&link->link);
 	kfree(tlinks);
