@@ -7703,22 +7703,20 @@ BPF_CALL_3(bpf_skb_set_tstamp, struct sk_buff *, skb,
 		return -EOPNOTSUPP;
 
 	switch (tstamp_type) {
-	case BPF_SKB_TSTAMP_DELIVERY_MONO:
+	case BPF_SKB_CLOCK_MONOTONIC:
 		if (!tstamp)
 			return -EINVAL;
 		skb->tstamp = tstamp;
 		skb->tstamp_type = SKB_CLOCK_MONOTONIC;
 		break;
-	case BPF_SKB_TSTAMP_DELIVERY_TAI:
+	case BPF_SKB_CLOCK_TAI:
 		if (!tstamp)
 			return -EINVAL;
 		skb->tstamp = tstamp;
 		skb->tstamp_type = SKB_CLOCK_TAI;
 		break;
-	case BPF_SKB_TSTAMP_UNSPEC:
-		if (tstamp)
-			return -EINVAL;
-		skb->tstamp = 0;
+	case BPF_SKB_CLOCK_REALTIME:
+		skb->tstamp = tstamp;
 		skb->tstamp_type = SKB_CLOCK_REALTIME;
 		break;
 	default:
@@ -9370,7 +9368,12 @@ static struct bpf_insn *bpf_convert_tstamp_type_read(const struct bpf_insn *si,
 {
 	__u8 value_reg = si->dst_reg;
 	__u8 skb_reg = si->src_reg;
-	BUILD_BUG_ON(__SKB_CLOCK_MAX != BPF_SKB_TSTAMP_DELIVERY_TAI);
+
+	BUILD_BUG_ON(SKB_CLOCK_REALTIME != BPF_SKB_CLOCK_REALTIME);
+	BUILD_BUG_ON(SKB_CLOCK_MONOTONIC != BPF_SKB_CLOCK_MONOTONIC);
+	BUILD_BUG_ON(SKB_CLOCK_TAI != BPF_SKB_CLOCK_TAI);
+	BUILD_BUG_ON(__SKB_CLOCK_MAX != BPF_SKB_CLOCK_TAI);
+
 	*insn++ = BPF_LDX_MEM(BPF_B, value_reg, skb_reg, SKB_BF_MONO_TC_OFFSET);
 	*insn++ = BPF_ALU32_IMM(BPF_AND, value_reg, SKB_TSTAMP_TYPE_MASK);
 #ifdef __BIG_ENDIAN_BITFIELD
@@ -9378,9 +9381,6 @@ static struct bpf_insn *bpf_convert_tstamp_type_read(const struct bpf_insn *si,
 #else
 	BUILD_BUG_ON(!(SKB_TSTAMP_TYPE_MASK & 0x1));
 #endif
-	*insn++ = BPF_JMP32_IMM(BPF_JNE, value_reg, SKB_TSTAMP_TYPE_MASK, 1);
-	/* Both the bits set then mark it BPF_SKB_TSTAMP_UNSPEC */
-	*insn++ = BPF_MOV64_IMM(value_reg, BPF_SKB_TSTAMP_UNSPEC);
 	return insn;
 }
 
@@ -9412,7 +9412,6 @@ static struct bpf_insn *bpf_convert_tstamp_read(const struct bpf_prog *prog,
 	__u8 value_reg = si->dst_reg;
 	__u8 skb_reg = si->src_reg;
 
-BUILD_BUG_ON(__SKB_CLOCK_MAX != BPF_SKB_TSTAMP_DELIVERY_TAI);
 #ifdef CONFIG_NET_XGRESS
 	/* If the tstamp_type is read,
 	 * the bpf prog is aware the tstamp could have delivery time.
