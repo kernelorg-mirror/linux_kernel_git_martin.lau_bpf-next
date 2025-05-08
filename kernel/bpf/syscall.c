@@ -1550,6 +1550,9 @@ static int map_create(union bpf_attr *attr, bool kernel)
 		return err;
 	}
 
+	if (ops->map_settle)
+		ops->map_settle(map);
+
 	return err;
 
 free_map_sec:

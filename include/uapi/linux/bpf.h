@@ -1417,6 +1417,9 @@ enum {
 
 /* Do not translate kernel bpf_arena pointers to user pointers */
 	BPF_F_NO_USER_CONV	= (1U << 18),
+
+/* Use reserved local storage */
+	BPF_F_RESERVE_LOCAL_STORAGE = (1U << 19),
 };
 
 /* Flags for BPF_PROG_QUERY. */

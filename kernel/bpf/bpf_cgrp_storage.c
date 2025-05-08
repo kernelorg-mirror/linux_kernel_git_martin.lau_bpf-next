@@ -146,14 +146,19 @@ static int notsupp_get_next_key(struct bpf_map *map, void *key, void *next_key)
 	return -ENOTSUPP;
 }
 
+static int cgroup_storage_map_alloc_check(union bpf_attr *attr)
+{
+	return bpf_local_storage_map_alloc_check(attr, NULL);
+}
+
 static struct bpf_map *cgroup_storage_map_alloc(union bpf_attr *attr)
 {
-	return bpf_local_storage_map_alloc(attr, &cgroup_cache, true);
+	return bpf_local_storage_map_alloc(attr, NULL, &cgroup_cache, true);
 }
 
 static void cgroup_storage_map_free(struct bpf_map *map)
 {
-	bpf_local_storage_map_free(map, &cgroup_cache, &bpf_cgrp_storage_busy);
+	bpf_local_storage_map_free(map, NULL, &cgroup_cache, &bpf_cgrp_storage_busy);
 }
 
 /* *gfp_flags* is a hidden argument provided by the verifier */
@@ -206,7 +211,7 @@ BPF_CALL_2(bpf_cgrp_storage_delete, struct bpf_map *, map, struct cgroup *, cgro
 
 const struct bpf_map_ops cgrp_storage_map_ops = {
 	.map_meta_equal = bpf_map_meta_equal,
-	.map_alloc_check = bpf_local_storage_map_alloc_check,
+	.map_alloc_check = cgroup_storage_map_alloc_check,
 	.map_alloc = cgroup_storage_map_alloc,
 	.map_free = cgroup_storage_map_free,
 	.map_get_next_key = notsupp_get_next_key,

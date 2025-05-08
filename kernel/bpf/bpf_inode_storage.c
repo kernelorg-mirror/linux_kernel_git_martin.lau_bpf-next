@@ -181,19 +181,24 @@ static int notsupp_get_next_key(struct bpf_map *map, void *key,
 	return -ENOTSUPP;
 }
 
+static int inode_storage_map_alloc_check(union bpf_attr *attr)
+{
+	return bpf_local_storage_map_alloc_check(attr, NULL);
+}
+
 static struct bpf_map *inode_storage_map_alloc(union bpf_attr *attr)
 {
-	return bpf_local_storage_map_alloc(attr, &inode_cache, false);
+	return bpf_local_storage_map_alloc(attr, NULL, &inode_cache, false);
 }
 
 static void inode_storage_map_free(struct bpf_map *map)
 {
-	bpf_local_storage_map_free(map, &inode_cache, NULL);
+	bpf_local_storage_map_free(map, NULL, &inode_cache, NULL);
 }
 
 const struct bpf_map_ops inode_storage_map_ops = {
 	.map_meta_equal = bpf_map_meta_equal,
-	.map_alloc_check = bpf_local_storage_map_alloc_check,
+	.map_alloc_check = inode_storage_map_alloc_check,
 	.map_alloc = inode_storage_map_alloc,
 	.map_free = inode_storage_map_free,
 	.map_get_next_key = notsupp_get_next_key,

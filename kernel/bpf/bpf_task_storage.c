@@ -308,20 +308,25 @@ static int notsupp_get_next_key(struct bpf_map *map, void *key, void *next_key)
 	return -ENOTSUPP;
 }
 
+static int task_storage_map_alloc_check(union bpf_attr *attr)
+{
+	return bpf_local_storage_map_alloc_check(attr, NULL);
+}
+
 static struct bpf_map *task_storage_map_alloc(union bpf_attr *attr)
 {
-	return bpf_local_storage_map_alloc(attr, &task_cache, true);
+	return bpf_local_storage_map_alloc(attr, NULL, &task_cache, true);
 }
 
 static void task_storage_map_free(struct bpf_map *map)
 {
-	bpf_local_storage_map_free(map, &task_cache, &bpf_task_storage_busy);
+	bpf_local_storage_map_free(map, NULL, &task_cache, &bpf_task_storage_busy);
 }
 
 BTF_ID_LIST_GLOBAL_SINGLE(bpf_local_storage_map_btf_id, struct, bpf_local_storage_map)
 const struct bpf_map_ops task_storage_map_ops = {
 	.map_meta_equal = bpf_map_meta_equal,
-	.map_alloc_check = bpf_local_storage_map_alloc_check,
+	.map_alloc_check = task_storage_map_alloc_check,
 	.map_alloc = task_storage_map_alloc,
 	.map_free = task_storage_map_free,
 	.map_get_next_key = notsupp_get_next_key,

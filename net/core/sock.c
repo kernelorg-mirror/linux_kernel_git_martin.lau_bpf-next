@@ -135,6 +135,7 @@
 #include <net/cls_cgroup.h>
 #include <net/netprio_cgroup.h>
 #include <linux/sock_diag.h>
+#include <net/bpf_sk_storage.h>
 
 #include <linux/filter.h>
 #include <net/sock_reuseport.h>
@@ -2148,6 +2149,22 @@ static inline void sock_lock_init(struct sock *sk)
 			af_family_keys + sk->sk_family);
 }
 
+#ifdef CONFIG_BPF_SYSCALL
+#define sk_reserved_size(obj_size) ((obj_size) + bpf_sk_reserve)
+#define sk_from_reserve(sk_reserve) ((struct sock *)((void*)(sk_reserve) + bpf_sk_reserve))
+#define sk_reserve(sk) ((void *)(sk) - bpf_sk_reserve)
+#define sk_reserve_init(sk)						\
+	({								\
+		if (unlikely(bpf_sk_reserve))				\
+			memset(sk_reserve(sk), 0, bpf_sk_reserve);	\
+	})
+#else
+#define sk_reserved_size(obj_size) (obj_size)
+#define sk_from_reserve(sk_reserve) ((struct sock *)(sk_reserve))
+#define sk_reserve(sk) ((void *)(sk))
+#define sk_reserve_init(sk)
+#endif
+
 /*
  * Copy all fields from osk to nsk but nsk->sk_refcnt must not change yet,
  * even temporarily, because of RCU lookups. sk_node should also be left as is.
@@ -2186,24 +2203,29 @@ static struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
 {
 	struct sock *sk;
 	struct kmem_cache *slab;
+	void *sk_reserve;
 
 	slab = prot->slab;
 	if (slab != NULL) {
-		sk = kmem_cache_alloc(slab, priority & ~__GFP_ZERO);
-		if (!sk)
-			return sk;
+		sk_reserve = kmem_cache_alloc(slab, priority & ~__GFP_ZERO);
+		if (!sk_reserve)
+			return NULL;
 		if (want_init_on_alloc(priority))
-			sk_prot_clear_nulls(sk, prot->obj_size);
+			sk_prot_clear_nulls(sk_from_reserve(sk_reserve), prot->obj_size);
 	} else
-		sk = kmalloc(prot->obj_size, priority);
+		sk_reserve = kmalloc(prot->obj_size, priority);
 
-	if (sk != NULL) {
-		if (security_sk_alloc(sk, family, priority))
-			goto out_free;
+	if (!sk_reserve)
+		return NULL;
 
-		if (!try_module_get(prot->owner))
-			goto out_free_sec;
-	}
+	sk = sk_from_reserve(sk_reserve);
+	if (security_sk_alloc(sk, family, priority))
+		goto out_free;
+
+	if (!try_module_get(prot->owner))
+		goto out_free_sec;
+
+	sk_reserve_init(sk);
 
 	return sk;
 
@@ -2211,9 +2233,9 @@ out_free_sec:
 	security_sk_free(sk);
 out_free:
 	if (slab != NULL)
-		kmem_cache_free(slab, sk);
+		kmem_cache_free(slab, sk_reserve);
 	else
-		kfree(sk);
+		kfree(sk_reserve);
 	return NULL;
 }
 
@@ -2232,9 +2254,9 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
 	sk_owner_put(sk);
 
 	if (slab != NULL)
-		kmem_cache_free(slab, sk);
+		kmem_cache_free(slab, sk_reserve(sk));
 	else
-		kfree(sk);
+		kfree(sk_reserve(sk));
 	module_put(owner);
 }
 
@@ -4113,6 +4135,7 @@ int proto_register(struct proto *prot, int alloc_slab)
 		pr_err("%s: missing per_cpu_fw_alloc\n", prot->name);
 		return -EINVAL;
 	}
+	prot->obj_size = sk_reserved_size(prot->obj_size);
 	if (alloc_slab) {
 		prot->slab = kmem_cache_create_usercopy(prot->name,
 					prot->obj_size, 0,

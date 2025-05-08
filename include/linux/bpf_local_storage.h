@@ -53,6 +53,7 @@ struct bpf_local_storage_map {
 	 * multiple buckets to improve contention.
 	 */
 	struct bpf_local_storage_map_bucket *buckets;
+	u32 reserve_off;
 	u32 bucket_log;
 	u16 elem_size;
 	u16 cache_idx;
@@ -127,11 +128,29 @@ static struct bpf_local_storage_cache name = {			\
 	.idx_lock = __SPIN_LOCK_UNLOCKED(name.idx_lock),	\
 }
 
+#define MAX_BPF_LS_RESERVE_MAPS 64
+
+struct bpf_ls_reserve {
+	spinlock_t lock;
+	u16 limit;
+	u16 used;
+	u16 last_off;
+	u16 nr_maps;
+	const struct bpf_local_storage_map *smaps[MAX_BPF_LS_RESERVE_MAPS];
+};
+
+#define DEFINE_BPF_STORAGE_RESERVE(name)				\
+static struct bpf_ls_reserve name = {					\
+	.lock = __SPIN_LOCK_UNLOCKED(name.lock),			\
+}
+
 /* Helper functions for bpf_local_storage */
-int bpf_local_storage_map_alloc_check(union bpf_attr *attr);
+int bpf_local_storage_map_alloc_check(union bpf_attr *attr,
+				      struct bpf_ls_reserve *reserve);
 
 struct bpf_map *
 bpf_local_storage_map_alloc(union bpf_attr *attr,
+			    struct bpf_ls_reserve *reserve,
 			    struct bpf_local_storage_cache *cache,
 			    bool bpf_ma);
 
@@ -169,6 +188,7 @@ bpf_local_storage_lookup(struct bpf_local_storage *local_storage,
 void bpf_local_storage_destroy(struct bpf_local_storage *local_storage);
 
 void bpf_local_storage_map_free(struct bpf_map *map,
+				struct bpf_ls_reserve *reserve,
 				struct bpf_local_storage_cache *cache,
 				int __percpu *busy_counter);
 
@@ -204,5 +224,7 @@ bpf_local_storage_update(void *owner, struct bpf_local_storage_map *smap,
 			 void *value, u64 map_flags, bool swap_uptrs, gfp_t gfp_flags);
 
 u64 bpf_local_storage_map_mem_usage(const struct bpf_map *map);
+
+void bpf_ls_reserve_commit(struct bpf_map *map, struct bpf_ls_reserve *reserve);
 
 #endif /* _BPF_LOCAL_STORAGE_H */

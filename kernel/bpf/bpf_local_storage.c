@@ -15,7 +15,7 @@
 #include <linux/rcupdate_trace.h>
 #include <linux/rcupdate_wait.h>
 
-#define BPF_LOCAL_STORAGE_CREATE_FLAG_MASK (BPF_F_NO_PREALLOC | BPF_F_CLONE)
+#define BPF_LOCAL_STORAGE_CREATE_FLAG_MASK (BPF_F_NO_PREALLOC | BPF_F_CLONE | BPF_F_RESERVE_LOCAL_STORAGE)
 
 static struct bpf_local_storage_map_bucket *
 select_bucket(struct bpf_local_storage_map *smap,
@@ -701,15 +701,23 @@ static void bpf_local_storage_cache_idx_free(struct bpf_local_storage_cache *cac
 	spin_unlock(&cache->idx_lock);
 }
 
-int bpf_local_storage_map_alloc_check(union bpf_attr *attr)
+int bpf_local_storage_map_alloc_check(union bpf_attr *attr,
+				      struct bpf_ls_reserve *reserve)
 {
-	if (attr->map_flags & ~BPF_LOCAL_STORAGE_CREATE_FLAG_MASK ||
-	    !(attr->map_flags & BPF_F_NO_PREALLOC) ||
+	__u32 map_flags = attr->map_flags;
+
+	if (map_flags & ~BPF_LOCAL_STORAGE_CREATE_FLAG_MASK ||
+	    !(map_flags & BPF_F_NO_PREALLOC) ||
 	    attr->max_entries ||
 	    attr->key_size != sizeof(int) || !attr->value_size ||
 	    /* Enforce BTF for userspace sk dumping */
 	    !attr->btf_key_type_id || !attr->btf_value_type_id)
 		return -EINVAL;
+
+	if (map_flags & BPF_F_RESERVE_LOCAL_STORAGE) {
+		if (!reserve || map_flags & BPF_F_CLONE || !attr->map_name[0])
+			return -EINVAL;
+	}
 
 	if (attr->value_size > BPF_LOCAL_STORAGE_MAX_VALUE_SIZE)
 		return -E2BIG;
@@ -729,6 +737,25 @@ int bpf_local_storage_map_check_btf(const struct bpf_map *map,
 
 	int_data = *(u32 *)(key_type + 1);
 	if (BTF_INT_BITS(int_data) != 32 || BTF_INT_OFFSET(int_data))
+		return -EINVAL;
+
+	/* [MOVE TO COMMIT MESSAGE]
+	 * It cannot support kptr, uptr, and other fields
+	 * that depend on the kernel to release its resources.
+	 * It is because a tracing prog may be run after the
+	 * __sk_destruct which may reinit those fields.
+	 *
+	 * It could use refcount_inc_not_zero to detect it, like the
+	 * current slow path of the bpf_sk_storage_get does
+	 * but it will be too expensive for every fast path
+	 * read here.
+	 *
+	 * Thus, special field is not supported. The
+	 * [res_]spin_lock should be safe which can be revisited
+	 * later when there is a need.
+	 */
+	if ((map->map_flags & BPF_F_RESERVE_LOCAL_STORAGE) &&
+	    !IS_ERR_OR_NULL(map->record))
 		return -EINVAL;
 
 	return 0;
@@ -788,6 +815,64 @@ u64 bpf_local_storage_map_mem_usage(const struct bpf_map *map)
 	return usage;
 }
 
+static int bpf_ls_reserve(struct bpf_local_storage_map *smap, struct bpf_ls_reserve *reserve)
+{
+	struct bpf_map *map = &smap->map;
+	int i, err = 0;
+
+	spin_lock(&reserve->lock);
+
+	for (i = 0; reserve->nr_maps; i++) {
+		/* FIXME: Compare the value btf type also? */
+		if (!strcmp(reserve->smaps[i]->map.name, map->name)) {
+			err = -EEXIST;
+			goto unlock;
+		}
+	}
+
+	if (map->value_size > reserve->limit - reserve->used ||
+	    reserve->nr_maps == MAX_BPF_LS_RESERVE_MAPS) {
+		err = -ENOSPC;
+		goto unlock;
+	}
+
+	/* FIXME: ensure value_size is 8 bytes aligned?	*/
+	reserve->used += map->value_size;
+	reserve->smaps[reserve->nr_maps++] = smap;
+
+unlock:
+	spin_unlock(&reserve->lock);
+	return err;
+}
+
+static void bpf_ls_reserve_discard(struct bpf_local_storage_map *smap,
+				   struct bpf_ls_reserve *reserve)
+{
+	int i;
+
+	spin_lock(&reserve->lock);
+	for (i = 0; i < reserve->nr_maps; i++) {
+		if (reserve->smaps[i] == smap) {
+			reserve->smaps[i] = reserve->smaps[reserve->nr_maps - 1];
+			break;
+		}
+	}
+	reserve->used -= smap->map.value_size;
+	reserve->nr_maps--;
+	spin_unlock(&reserve->lock);
+}
+
+void bpf_ls_reserve_commit(struct bpf_map *map, struct bpf_ls_reserve *reserve)
+{
+	struct bpf_local_storage_map *smap = (struct bpf_local_storage_map *)map;
+
+	spin_lock(&reserve->lock);
+	reserve->last_off += smap->map.value_size;
+	smap->reserve_off = reserve->last_off; 
+	bpf_map_inc(&smap->map);
+	spin_unlock(&reserve->lock);
+}
+
 /* When bpf_ma == true, the bpf_mem_alloc is used to allocate and free memory.
  * A deadlock free allocator is useful for storage that the bpf prog can easily
  * get a hold of the owner PTR_TO_BTF_ID in any context. eg. bpf_get_current_task_btf.
@@ -800,6 +885,7 @@ u64 bpf_local_storage_map_mem_usage(const struct bpf_map *map)
  */
 struct bpf_map *
 bpf_local_storage_map_alloc(union bpf_attr *attr,
+			    struct bpf_ls_reserve *reserve,
 			    struct bpf_local_storage_cache *cache,
 			    bool bpf_ma)
 {
@@ -812,6 +898,15 @@ bpf_local_storage_map_alloc(union bpf_attr *attr,
 	if (!smap)
 		return ERR_PTR(-ENOMEM);
 	bpf_map_init_from_attr(&smap->map, attr);
+
+	if (smap->map.map_flags & BPF_F_RESERVE_LOCAL_STORAGE) {
+		err = bpf_ls_reserve(smap, reserve);
+		if (err) {
+			bpf_map_area_free(smap);
+			return ERR_PTR(err);
+		}
+		return &smap->map;
+	}
 
 	nbuckets = roundup_pow_of_two(num_possible_cpus());
 	/* Use at least 2 buckets, select_bucket() is undefined behavior with 1 bucket */
@@ -860,6 +955,7 @@ free_smap:
 }
 
 void bpf_local_storage_map_free(struct bpf_map *map,
+				struct bpf_ls_reserve *reserve,
 				struct bpf_local_storage_cache *cache,
 				int __percpu *busy_counter)
 {
@@ -869,6 +965,12 @@ void bpf_local_storage_map_free(struct bpf_map *map,
 	unsigned int i;
 
 	smap = (struct bpf_local_storage_map *)map;
+	if (smap->map.map_flags & BPF_F_RESERVE_LOCAL_STORAGE) {
+		bpf_ls_reserve_discard(smap, reserve);
+		bpf_map_area_free(smap);
+		return;
+	}
+
 	bpf_local_storage_cache_idx_free(cache, smap->cache_idx);
 
 	/* Note that this map might be concurrently cloned from
