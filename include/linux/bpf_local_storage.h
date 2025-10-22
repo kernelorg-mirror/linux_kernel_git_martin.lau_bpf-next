@@ -73,6 +73,10 @@ struct bpf_local_storage_data {
 	u8 data[] __aligned(8);
 };
 
+#define BPF_LS_UNLINK_NONE	0
+#define BPF_LS_UNLINK_MAP	1
+#define BPF_LS_UNLINK_STORAGE	2
+
 /* Linked to bpf_local_storage and bpf_local_storage_map */
 struct bpf_local_storage_elem {
 	struct hlist_node map_node;	/* Linked to bpf_local_storage_map */
@@ -84,6 +88,10 @@ struct bpf_local_storage_elem {
 						 * bpf_selem_free
 						 * after raw_spin_unlock
 						 */
+		struct {
+			long unlink_state;
+			u32 uncharge;
+		};
 	};
 	/* 8 bytes hole */
 	/* The data is stored in another cacheline to minimize
@@ -99,7 +107,13 @@ struct bpf_local_storage {
 	void *owner;		/* The object that owns the above "list" of
 				 * bpf_local_storage_elem.
 				 */
-	struct rcu_head rcu;
+	union {
+		struct rcu_head rcu;
+		struct {
+			struct bpf_local_storage __rcu **owner_storage_ptr;
+			bool bpf_ma;
+		};
+	};
 	rqspinlock_t lock;	/* Protect adding/removing from the "list" */
 };
 
@@ -167,7 +181,7 @@ bpf_local_storage_lookup(struct bpf_local_storage *local_storage,
 	return SDATA(selem);
 }
 
-void bpf_local_storage_destroy(struct bpf_local_storage *local_storage);
+u32 bpf_local_storage_destroy(struct bpf_local_storage *local_storage);
 
 void bpf_local_storage_map_free(struct bpf_map *map,
 				struct bpf_local_storage_cache *cache);

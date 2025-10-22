@@ -180,11 +180,12 @@ BPF_CALL_5(bpf_task_storage_get, struct bpf_map *, map, struct task_struct *,
 		return (unsigned long)sdata->data;
 
 	/* only allocate new storage, when the task is refcounted */
-	if (refcount_read(&task->usage) &&
-	    (flags & BPF_LOCAL_STORAGE_GET_F_CREATE)) {
+	if ((flags & BPF_LOCAL_STORAGE_GET_F_CREATE) &&
+	    tryget_task_struct(task)) {
 		sdata = bpf_local_storage_update(
 			task, (struct bpf_local_storage_map *)map, value,
 			BPF_NOEXIST, false, gfp_flags);
+		put_task_struct(task);
 		return IS_ERR(sdata) ? (unsigned long)NULL : (unsigned long)sdata->data;
 	}
 
